@@ -2,16 +2,11 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const bodyParser = require("body-parser");
-const https = require("https");
-const http = require("http");
 const cors = require("cors");
+const multer = require("multer");
 
 const app = express();
-
-// Middleware
-app.use(bodyParser.json({ limit: "500mb" }));
-app.use(cors()); // Allow cross-origin requests if Unity WebGL is used
+app.use(cors()); // Allow cross-origin requests
 
 // Directories
 const DATA_DIR = path.join(__dirname, "data");
@@ -22,55 +17,54 @@ const ensureDir = (dir) => { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recurs
 ensureDir(WORLDS_DIR);
 ensureDir(AVATARS_DIR);
 
-// Cloudflare domain (must be HTTPS)
+// Cloudflare domain
 const CLOUD_DOMAIN = "https://files.soulsgames.com";
 
-// Helpers
-function saveBase64File(base64, destPath) {
-    const buffer = Buffer.from(base64, "base64");
-    fs.writeFileSync(destPath, buffer);
-}
-
-function saveMetadata(type, fileName, metadata) {
-    const metaPath = path.join(type === "world" ? WORLDS_DIR : AVATARS_DIR, fileName + ".json");
-    fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
-}
+// --- Multer setup for file uploads ---
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const type = req.body.type === "avatar" ? AVATARS_DIR : WORLDS_DIR;
+        cb(null, type);
+    },
+    filename: (req, file, cb) => {
+        cb(null, file.originalname);
+    }
+});
+const upload = multer({ storage, limits: { fileSize: 1024 * 1024 * 500 } }); // 500 MB max
 
 // --- Upload endpoints ---
-app.post("/worlds", (req, res) => {
-    const { userId, fileName, fileContent, description, isPublic, isNSFW, pfp } = req.body;
-    if (!userId || !fileName || !fileContent) return res.status(400).json({ success: false, message: "Missing fields" });
+app.post("/upload", upload.single("file"), (req, res) => {
+    try {
+        const { userId, name, description, isPublic, isNSFW, type, preview } = req.body;
+        if (!userId || !name || !req.file) return res.status(400).json({ success: false, message: "Missing fields or file" });
 
-    const destPath = path.join(WORLDS_DIR, fileName);
-    saveBase64File(fileContent, destPath);
+        // Save metadata
+        const metadata = {
+            userId,
+            fileName: req.file.filename,
+            description: description || "",
+            isPublic: isPublic === "true",
+            isNSFW: isNSFW === "true",
+            uploadedAt: new Date().toISOString(),
+            preview: preview || null
+        };
 
-    const metadata = { userId, fileName, description, isPublic, isNSFW, pfp: pfp || null, uploadedAt: new Date().toISOString() };
-    saveMetadata("world", fileName, metadata);
+        const dir = type === "avatar" ? AVATARS_DIR : WORLDS_DIR;
+        const metaPath = path.join(dir, req.file.filename + ".json");
+        fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
 
-    return res.json({
-        success: true,
-        fileName,
-        url: `${CLOUD_DOMAIN}/worlds/${encodeURIComponent(fileName)}`,
-        message: "World uploaded successfully"
-    });
-});
+        console.log(`[UPLOAD] ${type} uploaded: ${req.file.filename} by ${userId}`);
 
-app.post("/avatars", (req, res) => {
-    const { userId, fileName, fileContent, description, isPublic, isNSFW, pfp } = req.body;
-    if (!userId || !fileName || !fileContent) return res.status(400).json({ success: false, message: "Missing fields" });
-
-    const destPath = path.join(AVATARS_DIR, fileName);
-    saveBase64File(fileContent, destPath);
-
-    const metadata = { userId, fileName, description, isPublic, isNSFW, pfp: pfp || null, uploadedAt: new Date().toISOString() };
-    saveMetadata("avatar", fileName, metadata);
-
-    return res.json({
-        success: true,
-        fileName,
-        url: `${CLOUD_DOMAIN}/avatars/${encodeURIComponent(fileName)}`,
-        message: "Avatar uploaded successfully"
-    });
+        res.json({
+            success: true,
+            fileName: req.file.filename,
+            url: `${CLOUD_DOMAIN}/${type === "avatar" ? "avatars" : "worlds"}/${encodeURIComponent(req.file.filename)}`,
+            message: `${type} uploaded successfully`
+        });
+    } catch (e) {
+        console.error("[UPLOAD ERROR]", e);
+        res.status(500).json({ success: false, message: e.message });
+    }
 });
 
 // --- Verify endpoint ---
@@ -83,7 +77,7 @@ app.get("/verify", (req, res) => {
     const metaPath = path.join(dir, name + ".json");
 
     const exists = fs.existsSync(filePath) && fs.existsSync(metaPath);
-    return res.json({ success: exists, fileName: name });
+    res.json({ success: exists, fileName: name });
 });
 
 // --- List endpoint ---
@@ -96,10 +90,9 @@ app.get("/list/:type", (req, res) => {
         .filter(f => f.endsWith(".json"))
         .map(f => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")));
 
-    // Ensure all URLs are HTTPS
+    // Ensure URLs are HTTPS
     files.forEach(f => {
-        if (type === "world") f.url = `${CLOUD_DOMAIN}/worlds/${encodeURIComponent(f.fileName)}`;
-        else f.url = `${CLOUD_DOMAIN}/avatars/${encodeURIComponent(f.fileName)}`;
+        f.url = `${CLOUD_DOMAIN}/${type === "world" ? "worlds" : "avatars"}/${encodeURIComponent(f.fileName)}`;
     });
 
     res.json(files);
@@ -115,13 +108,14 @@ app.delete("/:type/:name", (req, res) => {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
 
+    console.log(`[DELETE] ${type} deleted: ${name}`);
     res.json({ success: true, fileName: name });
 });
 
-// Serve static files (always HTTPS via Cloudflare)
+// --- Serve static files ---
 app.use("/worlds", express.static(WORLDS_DIR));
 app.use("/avatars", express.static(AVATARS_DIR));
 
-// Start server (HTTP only for internal use; HTTPS handled by Cloudflare)
+// Start server
 const PORT = 3000;
-app.listen(PORT, "0.0.0.0", () => console.log(`File server running on port ${PORT}. All URLs must use HTTPS via Cloudflare.`));
+app.listen(PORT, "0.0.0.0", () => console.log(`File server running on port ${PORT}. Use HTTPS via Cloudflare.`));
