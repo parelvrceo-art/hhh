@@ -7,7 +7,7 @@ const bodyParser = require("body-parser");
 const app = express();
 const PORT = 3000;
 
-// Replace with your Cloudflare subdomain
+// Your Cloudflare subdomain
 const CLOUD_DOMAIN = "https://files.soulsgames.com";
 
 // Middleware
@@ -114,5 +114,5 @@ app.delete("/:type/:name", (req, res) => {
 app.use("/worlds", express.static(WORLDS_DIR));
 app.use("/avatars", express.static(AVATARS_DIR));
 
-// Start server
-app.listen(PORT, () => console.log(`ParelVR File Server running on http://localhost:${PORT}`));
+// Start server on all network interfaces
+app.listen(PORT, "0.0.0.0", () => console.log(`ParelVR File Server running at ${CLOUD_DOMAIN}:${PORT}`));
